@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 
 	"cloud.google.com/go/storage"
-	"github.com/tus/tusd/v2/internal/uid"
-	"github.com/tus/tusd/v2/pkg/handler"
+	"github.com/fetlife/tusd/v2/internal/uid"
+	"github.com/fetlife/tusd/v2/pkg/handler"
 )
 
 // See the handler.DataStore interface for documentation about the different
@@ -54,6 +54,7 @@ func New(bucket string, service GCSAPI) GCSStore {
 func (store GCSStore) UseIn(composer *handler.StoreComposer) {
 	composer.UseCore(store)
 	composer.UseTerminater(store)
+	composer.UseConcater(store)
 }
 
 func (store GCSStore) NewUpload(ctx context.Context, info handler.FileInfo) (handler.Upload, error) {
@@ -85,6 +86,10 @@ func (store GCSStore) GetUpload(ctx context.Context, id string) (handler.Upload,
 }
 
 func (store GCSStore) AsTerminatableUpload(upload handler.Upload) handler.TerminatableUpload {
+	return upload.(*gcsUpload)
+}
+
+func (store GCSStore) AsConcatableUpload(upload handler.Upload) handler.ConcatableUpload {
 	return upload.(*gcsUpload)
 }
 
@@ -225,10 +230,6 @@ func (upload gcsUpload) GetInfo(ctx context.Context) (handler.FileInfo, error) {
 	}
 
 	info.Offset = offset
-	err = store.writeInfo(ctx, store.keyWithPrefix(id), info)
-	if err != nil {
-		return info, err
-	}
 
 	return info, nil
 }
@@ -335,6 +336,32 @@ func (upload gcsUpload) GetReader(ctx context.Context) (io.ReadCloser, error) {
 	}
 
 	return store.Service.ReadObject(ctx, params)
+}
+
+func (upload gcsUpload) ConcatUploads(ctx context.Context, partialUploads []handler.Upload) error {
+	names := make([]string, len(partialUploads))
+	store := upload.store
+
+	for i, partialUpload := range partialUploads {
+		info, err := partialUpload.GetInfo(ctx)
+		if err != nil {
+			return err
+		}
+		names[i] = store.keyWithPrefix(info.ID)
+	}
+
+	composeParams := GCSComposeParams{
+		Bucket:      store.Bucket,
+		Destination: store.keyWithPrefix(upload.id),
+		Sources:     names,
+	}
+
+	err := store.Service.ComposeObjects(ctx, composeParams)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (store GCSStore) keyWithPrefix(key string) string {
